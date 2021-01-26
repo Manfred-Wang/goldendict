@@ -32,6 +32,12 @@
 #include <QPair>
 #include <QRegExp>
 #include <QProcess>
+#include <QVector>
+#include <QtAlgorithms>
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+#include <QRegularExpression>
+#endif
 
 #include <string>
 #include <vector>
@@ -111,8 +117,13 @@ bool indexIsOldOrBad( string const & indexFile )
 
 class SlobFile
 {
+public:
+  typedef QPair< quint64, quint32 > RefEntryOffsetItem;
+  typedef QVector< RefEntryOffsetItem > RefOffsetsVector;
+
+private:
   enum Compressions
-  { UNKNOWN = 0, ZLIB, BZ2, LZMA2 };
+  { UNKNOWN = 0, NONE, ZLIB, BZ2, LZMA2 };
 
   QFile file;
   QString fileName, dictionaryName;
@@ -129,11 +140,12 @@ class SlobFile
   quint32 currentItem;
   quint32 contentTypesCount;
   string currentItemData;
+  RefOffsetsVector refsOffsetVector;
 
   QString readTinyText();
   QString readText();
   QString readLargeText();
-  QString readString( unsigned lenght );
+  QString readString( unsigned length );
 
 public:
   SlobFile() :
@@ -177,6 +189,11 @@ public:
   QTextCodec * getCodec() const
   { return codec; }
 
+  const RefOffsetsVector & getSortedRefOffsets();
+
+  void clearRefOffsets()
+  { refsOffsetVector.clear(); }
+
   QString getContentType( quint8 content_id ) const
   { return content_id < contentTypes.size() ? contentTypes[ content_id ] : QString(); }
 
@@ -185,7 +202,9 @@ public:
 
   void open( const QString & name );
 
-  void getRefEntry( quint32 ref_nom, RefEntry & entry );
+  void getRefEntryAtOffset(quint64 offset, RefEntry & entry );
+
+  void getRefEntry(quint32 ref_nom, RefEntry & entry );
 
   quint8 getItem( RefEntry const & entry, string * data );
 };
@@ -301,6 +320,9 @@ QString error( name + ": " );
     else
     if( compr.compare( "lzma2", Qt::CaseInsensitive ) == 0 )
       compression = LZMA2;
+    else
+    if( compr.isEmpty() || compr.compare( "none", Qt::CaseInsensitive ) == 0 )
+      compression = NONE;
 
     // Read tags
 
@@ -369,17 +391,40 @@ QString error( name + ": " );
   throw exCantReadFile( string( error.toUtf8().data() ) );
 }
 
-void SlobFile::getRefEntry( quint32 ref_nom, RefEntry & entry )
+const SlobFile::RefOffsetsVector & SlobFile::getSortedRefOffsets()
 {
-  quint64 pos = refsOffset + ref_nom * sizeof( quint64 );
-  quint64 offset, tmp;
+  quint64 tmp;
+  qint64 size = refsCount * sizeof( quint64 );
+  quint64 base = refsOffset + size;
+
+  refsOffsetVector.clear();
+  refsOffsetVector.reserve( refsCount );
 
   for( ; ; )
   {
-    if( !file.seek( pos ) || file.read( ( char * )&tmp, sizeof( tmp ) ) != sizeof( tmp ) )
-      break;
-    offset = qFromBigEndian( tmp ) + refsOffset + refsCount * sizeof( quint64 );
+    QByteArray offsets;
+    offsets.resize( size );
 
+    if( !file.seek( refsOffset ) || file.read( offsets.data(), size ) != size )
+      break;
+
+    for( quint32 i = 0; i < refsCount; i++ )
+    {
+      memcpy( &tmp, offsets.data() + i * sizeof( quint64 ), sizeof( tmp ) );
+      refsOffsetVector.append( RefEntryOffsetItem( base + qFromBigEndian( tmp ), i ) );
+    }
+
+    qSort( refsOffsetVector );
+    return refsOffsetVector;
+  }
+  QString error = fileName + ": " + file.errorString();
+  throw exCantReadFile( string( error.toUtf8().data() ) );
+}
+
+void SlobFile::getRefEntryAtOffset( quint64 offset, RefEntry & entry )
+{
+  for( ; ; )
+  {
     if( !file.seek( offset ) )
       break;
 
@@ -396,6 +441,26 @@ void SlobFile::getRefEntry( quint32 ref_nom, RefEntry & entry )
     entry.binIndex = qFromBigEndian( binIndex );
 
     entry.fragment = readTinyText();
+
+    return;
+  }
+  QString error = fileName + ": " + file.errorString();
+  throw exCantReadFile( string( error.toUtf8().data() ) );
+}
+
+void SlobFile::getRefEntry( quint32 ref_nom, RefEntry & entry )
+{
+  quint64 pos = refsOffset + ref_nom * sizeof( quint64 );
+  quint64 offset, tmp;
+
+  for( ; ; )
+  {
+    if( !file.seek( pos ) || file.read( ( char * )&tmp, sizeof( tmp ) ) != sizeof( tmp ) )
+      break;
+
+    offset = qFromBigEndian( tmp ) + refsOffset + refsCount * sizeof( quint64 );
+
+    getRefEntryAtOffset( offset, entry );
 
     return;
   }
@@ -451,6 +516,9 @@ quint8 SlobFile::getItem( RefEntry const & entry, string * data )
 
         QByteArray compressedData = file.read( length );
 
+        if( compression == NONE )
+          currentItemData = string( compressedData.data(), compressedData.length() );
+        else
         if( compression == ZLIB )
           currentItemData = decompressZlib( compressedData.data(), length );
         else
@@ -537,11 +605,12 @@ class SlobDictionary: public BtreeIndexing::BtreeDictionary
 
     virtual sptr< Dictionary::DataRequest > getArticle( wstring const &,
                                                         vector< wstring > const & alts,
-                                                        wstring const & )
-      throw( std::exception );
+                                                        wstring const &,
+                                                        bool ignoreDiacritics )
+      THROW_SPEC( std::exception );
 
     virtual sptr< Dictionary::DataRequest > getResource( string const & name )
-      throw( std::exception );
+      THROW_SPEC( std::exception );
 
     virtual QString const& getDescription();
 
@@ -551,8 +620,12 @@ class SlobDictionary: public BtreeIndexing::BtreeDictionary
     virtual sptr< Dictionary::DataRequest > getSearchResults( QString const & searchString,
                                                               int searchMode, bool matchCase,
                                                               int distanceBetweenWords,
-                                                              int maxResults );
+                                                              int maxResults,
+                                                              bool ignoreWordsOrder,
+                                                              bool ignoreDiacritics );
     virtual void getArticleText( uint32_t articleAddress, QString & headword, QString & text );
+
+    quint64 getArticlePos(uint32_t articleNumber );
 
     virtual void makeFTSIndex(QAtomicInt & isCancelled, bool firstIteration );
 
@@ -745,26 +818,53 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 {
   QString text = QString::fromUtf8( in.c_str() );
 
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   // pattern of img and script
-  text.replace( QRegExp( "<\\s*(img|script)\\s*([^>]*)src=\"(|/)([^\"]*)\"" ),
+  text.replace( QRegularExpression( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ),
                 QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( getId().c_str() ) );
 
   // pattern <link... href="..." ...>
-  text.replace( QRegExp( "<\\s*link\\s*([^>]*)href=\"" ),
+  text.replace( QRegularExpression( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ),
                 QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
+#else
+  // pattern of img and script
+  text.replace( QRegExp( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ),
+                QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( getId().c_str() ) );
+
+  // pattern <link... href="..." ...>
+  text.replace( QRegExp( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ),
+                QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
+#endif
 
   // pattern <a href="..." ...>, excluding any known protocols such as http://, mailto:, #(comment)
   // these links will be translated into local definitions
+  QString anchor;
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+  QRegularExpression rxLink( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" );
+  QRegularExpressionMatchIterator it = rxLink.globalMatch( text );
+  int pos = 0;
+  QString newText;
+  while( it.hasNext() )
+  {
+    QRegularExpressionMatch match = it.next();
+
+    newText += text.midRef( pos, match.capturedStart() - pos );
+    pos = match.capturedEnd();
+
+    QStringList list = match.capturedTexts();
+    // Add empty strings for compatibility with QRegExp behaviour
+    for( int i = match.lastCapturedIndex() + 1; i < 5; i++ )
+      list.append( QString() );
+#else
   QRegExp rxLink( "<\\s*a\\s+([^>]*)href=\"(?!(\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>",
                        Qt::CaseSensitive,
                        QRegExp::RegExp2 );
-
-  QString anchor;
 
   int pos = 0;
   while( (pos = rxLink.indexIn( text, pos )) >= 0 )
   {
     QStringList list = rxLink.capturedTexts();
+#endif
     QString tag = list[3];
     if ( !list[4].isEmpty() )
       tag = list[4].split("\"")[1];
@@ -782,28 +882,62 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
         prepend( "<a href=\"gdlookup://localhost/" ).
         append( anchor + "\" " + list[4] + ">" );
 
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+    newText += tag;
+  }
+  if( pos )
+  {
+    newText += text.midRef( pos );
+    text = newText;
+  }
+  newText.clear();
+#else
     text.replace( pos, list[0].length(), tag );
     pos += tag.length() + 1;
   }
+#endif
 
   // Handle TeX formulas via mimetex.cgi
 
   if( !texCgiPath.isEmpty() )
   {
-    QRegExp texImage( "<\\s*img\\s*class=\"([^\"]+)\"\\s*alt=\"([^\"]+)\"[^>]*>",
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      QRegularExpression texImage( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>" );
+      QRegularExpression regFrac( "\\\\[dt]frac" );
+      QRegularExpression regSpaces( "\\s+([\\{\\(\\[\\}\\)\\]])" );
+#else
+    QRegExp texImage( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>",
                       Qt::CaseSensitive,
                       QRegExp::RegExp2 );
+    QRegExp regFrac = QRegExp( "\\\\[dt]frac" );
+    QRegExp regSpaces = QRegExp( "\\s+([\\{\\(\\[\\}\\)\\]])", Qt::CaseSensitive, QRegExp::RegExp2 );
+#endif
+    QRegExp multReg = QRegExp( "\\*\\{(\\d+)\\}([^\\{]|\\{([^\\}]+)\\})", Qt::CaseSensitive, QRegExp::RegExp2 );
+
+    QString arrayDesc( "\\begin{array}{" );
     pos = 0;
     unsigned texCount = 0;
     QString imgName;
 
-    QRegExp regFrac = QRegExp( "\\\\[dt]frac" );
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+    QRegularExpressionMatchIterator it = texImage.globalMatch( text );
+    QString newText;
+    while( it.hasNext() )
+    {
+      QRegularExpressionMatch match = it.next();
 
+      newText += text.midRef( pos, match.capturedStart() - pos );
+      pos = match.capturedEnd();
+
+      QStringList list = match.capturedTexts();
+#else
     while( (pos = texImage.indexIn( text, pos )) >= 0 )
     {
       QStringList list = texImage.capturedTexts();
+#endif
 
       if( list[ 1 ].compare( "tex" ) == 0
+          || list[ 1 ].compare( "mwe-math-fallback-image-inline" ) == 0
           || list[ 1 ].endsWith( " tex" ) )
       {
         QString name;
@@ -815,13 +949,78 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 
           // Replace some TeX commands which don't support by mimetex.cgi
 
-          QString tex = list[ 2 ];
+          QString tex = list[ 3 ];
+          tex.replace( regSpaces, "\\1" );
           tex.replace( regFrac, "\\frac" );
           tex.replace( "\\leqslant", "\\leq" );
           tex.replace( "\\geqslant", "\\geq" );
           tex.replace( "\\infin", "\\infty" );
           tex.replace( "\\iff", "\\Longleftrightarrow" );
           tex.replace( "\\tbinom", "\\binom" );
+          tex.replace( "\\implies", "\\Longrightarrow" );
+          tex.replace( "{aligned}", "{align*}" );
+          tex.replace( "\\Subset", "\\subset" );
+          tex.replace( "\\xrightarrow", "\\longrightarrow^" );
+          tex.remove( "\\scriptstyle" );
+          tex.remove( "\\mathop" );
+          tex.replace( "\\bigg|", "|" );
+
+          // Format array descriptions (mimetex now don't support *{N}x constructions in it)
+
+          int pos1 = 0;
+          while( pos1 >= 0 )
+          {
+            pos1 = tex.indexOf( arrayDesc, pos1, Qt::CaseInsensitive );
+            if( pos1 >= 0 )
+            {
+              // Retrieve array description
+              QString desc, newDesc;
+              int n = 0;
+              int nstart = pos1 + arrayDesc.size();
+              int i;
+              for( i = 0; i + nstart < tex.size(); i++ )
+              {
+                if( tex[ i + nstart ] == '{' )
+                  n += 1;
+                if( tex[ i + nstart ] == '}' )
+                  n -= 1;
+                if( n < 0 )
+                  break;
+              }
+              if( i > 0 && i + nstart + 1 < tex.size() )
+                desc = tex.mid( nstart, i );
+
+              if( !desc.isEmpty() )
+              {
+                // Expand multipliers: "*{5}x" -> "xxxxx"
+
+                newDesc = desc;
+                QString newStr;
+                int pos2 = 0;
+                while( pos2 >= 0 )
+                {
+                  pos2 = multReg.indexIn( newDesc, pos2 );
+                  if( pos2 >= 0 )
+                  {
+                    QStringList list = multReg.capturedTexts();
+                    int n = list[ 1 ].toInt();
+                    for( int i = 0; i < n; i++ )
+                      newStr += list[ 3 ].isEmpty() ? list[ 2 ] : list[ 3 ];
+                    newDesc.replace( pos2, list[ 0 ].size(), newStr );
+                    pos2 += newStr.size();
+                  }
+                  else
+                    break;
+                }
+                tex.replace( pos1 + arrayDesc.size(), desc.size(), newDesc );
+                pos1 += arrayDesc.size() + newDesc.size();
+              }
+              else
+                pos1 += arrayDesc.size();
+            }
+            else
+              break;
+          }
 
           QString command = texCgiPath + " -e " +  imgName
                             + " \"" + tex + "\"";
@@ -832,17 +1031,45 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 #ifdef Q_OS_WIN32
                       + "/"
 #endif
-                      + imgName + "\" alt=\"" + list[ 2 ] + "\">";
+                      + imgName + "\" alt=\"" + list[ 3 ] + "\">";
 
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+        newText += tag;
+#else
         text.replace( pos, list[0].length(), tag );
         pos += tag.length() + 1;
+#endif
 
         texCount += 1;
       }
       else
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+        newText += list[ 0 ];
+#else
         pos += list[ 0 ].length();
+#endif
     }
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+    if( pos )
+    {
+      newText += text.midRef( pos );
+      text = newText;
+    }
+    newText.clear();
+#endif
   }
+#ifdef Q_OS_WIN32
+  else
+  {
+    // Increase equations scale
+    text = QString::fromLatin1( "<script type=\"text/x-mathjax-config\">MathJax.Hub.Config({" )
+           + " SVG: { scale: 170, linebreaks: { automatic:true } }"
+           + ", \"HTML-CSS\": { scale: 210, linebreaks: { automatic:true } }"
+           + ", CommonHTML: { scale: 210, linebreaks: { automatic:true } }"
+           + " });</script>"
+           + text;
+  }
+#endif
 
   // Fix outstanding elements
   text += "<br style=\"clear:both;\" />";
@@ -853,7 +1080,6 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 void SlobDictionary::loadResource( std::string & resourceName, string & data )
 {
   vector< WordArticleLink > link;
-  string resData;
   RefEntry entry;
 
   link = resourceIndex.findArticles( Utf8::decode( resourceName ) );
@@ -898,6 +1124,16 @@ quint32 SlobDictionary::readArticle( quint32 articleNumber, std::string & result
   return contentId;
 }
 
+quint64 SlobDictionary::getArticlePos( uint32_t articleNumber )
+{
+  RefEntry entry;
+  {
+    Mutex::Lock _( slobMutex );
+    sf.getRefEntry( articleNumber, entry );
+  }
+  return ( ( (quint64)( entry.binIndex ) ) << 32 ) | entry.itemIndex;
+}
+
 void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration )
 {
   if( !( Dictionary::needToRebuildIndex( getDictionaryFilenames(), ftsIdxName )
@@ -935,6 +1171,7 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
     BtreeIndexing::IndexedWords indexedWords;
 
     QSet< uint32_t > setOfOffsets;
+    setOfOffsets.reserve( getWordCount() );
 
     findArticleLinks( 0, &setOfOffsets, 0, &isCancelled );
 
@@ -942,23 +1179,25 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
       throw exUserAbort();
 
     QVector< uint32_t > offsets;
-    offsets.resize( setOfOffsets.size() );
-    uint32_t * ptr = &offsets.front();
+    offsets.reserve( setOfOffsets.size() );
 
-    for( QSet< uint32_t >::ConstIterator it = setOfOffsets.constBegin();
-         it != setOfOffsets.constEnd(); ++it )
+    slobMutex.lock();
+    SlobFile::RefOffsetsVector const & sortedOffsets = sf.getSortedRefOffsets();
+    slobMutex.unlock();
+
+    qint32 entries = sf.getRefsCount();
+    for( qint32 i = 0; i < entries; i++ )
     {
-      *ptr = *it;
-      ptr++;
+      if( setOfOffsets.find( sortedOffsets[ i ].second ) != setOfOffsets.end() )
+        offsets.append( sortedOffsets[ i ].second );
     }
 
     // Free memory
+    sf.clearRefOffsets();
     setOfOffsets.clear();
 
     if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
       throw exUserAbort();
-
-    qSort( offsets );
 
     if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
       throw exUserAbort();
@@ -988,7 +1227,10 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
       QString articleStr;
       quint32 articleNom = offsets.at( i );
 
-      sf.getRefEntry( articleNom, entry );
+      {
+        Mutex::Lock _( slobMutex );
+        sf.getRefEntry( articleNom, entry );
+      }
 
       quint64 articleID = ( ( (quint64)entry.itemIndex ) << 32 ) | entry.binIndex;
 
@@ -1099,9 +1341,11 @@ void SlobDictionary::getArticleText( uint32_t articleAddress, QString & headword
 sptr< Dictionary::DataRequest > SlobDictionary::getSearchResults( QString const & searchString,
                                                                   int searchMode, bool matchCase,
                                                                   int distanceBetweenWords,
-                                                                  int maxResults )
+                                                                  int maxResults,
+                                                                  bool ignoreWordsOrder,
+                                                                  bool ignoreDiacritics )
 {
-  return new FtsHelpers::FTSResultsRequest( *this, searchString, searchMode, matchCase, distanceBetweenWords, maxResults );
+  return new FtsHelpers::FTSResultsRequest( *this, searchString, searchMode, matchCase, distanceBetweenWords, maxResults, ignoreWordsOrder, ignoreDiacritics );
 }
 
 
@@ -1136,6 +1380,7 @@ class SlobArticleRequest: public Dictionary::DataRequest
   wstring word;
   vector< wstring > alts;
   SlobDictionary & dict;
+  bool ignoreDiacritics;
 
   QAtomicInt isCancelled;
   QSemaphore hasExited;
@@ -1144,8 +1389,8 @@ public:
 
   SlobArticleRequest( wstring const & word_,
                       vector< wstring > const & alts_,
-                      SlobDictionary & dict_ ):
-    word( word_ ), alts( alts_ ), dict( dict_ )
+                      SlobDictionary & dict_, bool ignoreDiacritics_ ):
+    word( word_ ), alts( alts_ ), dict( dict_ ), ignoreDiacritics( ignoreDiacritics_ )
   {
     QThreadPool::globalInstance()->start(
       new SlobArticleRequestRunnable( *this, hasExited ) );
@@ -1178,24 +1423,26 @@ void SlobArticleRequest::run()
     return;
   }
 
-  vector< WordArticleLink > chain = dict.findArticles( word );
+  vector< WordArticleLink > chain = dict.findArticles( word, ignoreDiacritics );
 
   for( unsigned x = 0; x < alts.size(); ++x )
   {
     /// Make an additional query for each alt
 
-    vector< WordArticleLink > altChain = dict.findArticles( alts[ x ] );
+    vector< WordArticleLink > altChain = dict.findArticles( alts[ x ], ignoreDiacritics );
 
     chain.insert( chain.end(), altChain.begin(), altChain.end() );
   }
 
   multimap< wstring, pair< string, string > > mainArticles, alternateArticles;
 
-  set< quint32 > articlesIncluded; // Some synonims make it that the articles
+  set< quint64 > articlesIncluded; // Some synonims make it that the articles
                                     // appear several times. We combat this
                                     // by only allowing them to appear once.
 
   wstring wordCaseFolded = Folding::applySimpleCaseOnly( word );
+  if( ignoreDiacritics )
+    wordCaseFolded = Folding::applyDiacriticsOnly( wordCaseFolded );
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
@@ -1205,7 +1452,9 @@ void SlobArticleRequest::run()
       return;
     }
 
-    if ( articlesIncluded.find( chain[ x ].articleOffset ) != articlesIncluded.end() )
+    quint64 pos = dict.getArticlePos( chain[ x ].articleOffset ); // Several "articleOffset" values may refer to one article
+
+    if ( articlesIncluded.find( pos ) != articlesIncluded.end() )
       continue; // We already have this article in the body.
 
     // Now grab that article
@@ -1228,6 +1477,8 @@ void SlobArticleRequest::run()
 
     wstring headwordStripped =
       Folding::applySimpleCaseOnly( Utf8::decode( headword ) );
+    if( ignoreDiacritics )
+      headwordStripped = Folding::applyDiacriticsOnly( headwordStripped );
 
     multimap< wstring, pair< string, string > > & mapToUse =
       ( wordCaseFolded == headwordStripped ) ?
@@ -1237,7 +1488,7 @@ void SlobArticleRequest::run()
       Folding::applySimpleCaseOnly( Utf8::decode( headword ) ),
       pair< string, string >( headword, articleText ) ) );
 
-    articlesIncluded.insert( chain[ x ].articleOffset );
+    articlesIncluded.insert( pos );
   }
 
   if ( mainArticles.empty() && alternateArticles.empty() )
@@ -1253,17 +1504,17 @@ void SlobArticleRequest::run()
 
   for( i = mainArticles.begin(); i != mainArticles.end(); ++i )
   {
-      result += "<h3>";
+      result += "<div class=\"slobdict\"><h3 class=\"slobdict_headword\">";
       result += i->second.first;
-      result += "</h3>";
+      result += "</h3></div>";
       result += i->second.second;
   }
 
   for( i = alternateArticles.begin(); i != alternateArticles.end(); ++i )
   {
-      result += "<h3>";
+      result += "<div class=\"slobdict\"><h3 class=\"slobdict_headword\">";
       result += i->second.first;
-      result += "</h3>";
+      result += "</h3></div>";
       result += i->second.second;
   }
 
@@ -1280,10 +1531,11 @@ void SlobArticleRequest::run()
 
 sptr< Dictionary::DataRequest > SlobDictionary::getArticle( wstring const & word,
                                                             vector< wstring > const & alts,
-                                                            wstring const & )
-  throw( std::exception )
+                                                            wstring const &,
+                                                            bool ignoreDiacritics )
+  THROW_SPEC( std::exception )
 {
-  return new SlobArticleRequest( word, alts, *this );
+  return new SlobArticleRequest( word, alts, *this, ignoreDiacritics );
 }
 
 //// SlobDictionary::getResource()
@@ -1372,6 +1624,8 @@ void SlobResourceRequest::run()
       QString css = QString::fromUtf8( resource.data(), resource.size() );
       dict.isolateCSS( css, ".slobdict" );
       QByteArray bytes = css.toUtf8();
+
+      Mutex::Lock _( dataMutex );
       data.resize( bytes.size() );
       memcpy( &data.front(), bytes.constData(), bytes.size() );
     }
@@ -1414,6 +1668,7 @@ void SlobResourceRequest::run()
       memcpy( &data.front(), resource.data(), data.size() );
     }
 
+    Mutex::Lock _( dataMutex );
     hasAnyData = true;
   }
   catch( std::exception &ex )
@@ -1427,7 +1682,7 @@ void SlobResourceRequest::run()
 }
 
 sptr< Dictionary::DataRequest > SlobDictionary::getResource( string const & name )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   return new SlobResourceRequest( *this, name );
 }
@@ -1436,8 +1691,9 @@ sptr< Dictionary::DataRequest > SlobDictionary::getResource( string const & name
 vector< sptr< Dictionary::Class > > makeDictionaries(
                                       vector< string > const & fileNames,
                                       string const & indicesDir,
-                                      Dictionary::Initializing & initializing )
-  throw( std::exception )
+                                      Dictionary::Initializing & initializing,
+                                      unsigned maxHeadwordsToExpand )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > dictionaries;
 
@@ -1489,9 +1745,11 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
           set< quint64 > articlesPos;
           quint32 articleCount = 0, wordCount = 0;
 
+          SlobFile::RefOffsetsVector const & offsets = sf.getSortedRefOffsets();
+
           for( quint32 i = 0; i < entries; i++ )
           {
-            sf.getRefEntry( i, refEntry );
+            sf.getRefEntryAtOffset( offsets[ i ].first, refEntry );
 
             quint8 type = sf.getItem( refEntry, 0 );
 
@@ -1501,7 +1759,10 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
                 || contentType.startsWith( "text/plain", Qt::CaseInsensitive ) )
             {
               //Article
-              indexedWords.addWord( gd::toWString( refEntry.key ), i );
+              if( maxHeadwordsToExpand && entries > maxHeadwordsToExpand )
+                indexedWords.addSingleWord( gd::toWString( refEntry.key ), offsets[ i ].second );
+              else
+                indexedWords.addWord( gd::toWString( refEntry.key ), offsets[ i ].second );
 
               wordCount += 1;
 
@@ -1514,9 +1775,10 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
             }
             else
             {
-              indexedResources.addSingleWord( gd::toWString( refEntry.key ), i );
+              indexedResources.addSingleWord( gd::toWString( refEntry.key ), offsets[ i ].second );
             }
           }
+          sf.clearRefOffsets();
 
           // Build index
 

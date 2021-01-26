@@ -91,8 +91,8 @@ OrderAndProps::OrderAndProps( QWidget * parent,
 {
   ui.setupUi( this );
 
-  Instances::Group order( dictionaryOrder, allDictionaries );
-  Instances::Group inactive( inactiveDictionaries, allDictionaries );
+  Instances::Group order( dictionaryOrder, allDictionaries, Config::Group() );
+  Instances::Group inactive( inactiveDictionaries, allDictionaries, Config::Group() );
 
   Instances::complementDictionaryOrder( order, inactive, allDictionaries );
 
@@ -252,13 +252,8 @@ void OrderAndProps::describeDictionary( DictListWidget * lst, QModelIndex const 
 void OrderAndProps::contextMenuRequested( const QPoint & pos )
 {
   QMenu menu( this );
-  QAction * sortNameAction = new QAction( tr( "Sort by name" ), &menu );
-  menu.addAction( sortNameAction );
-  QAction * sortLangAction = new QAction( tr( "Sort by languages" ), &menu );
-  menu.addAction( sortLangAction );
 
   QAction * showHeadwordsAction = NULL;
-
   QModelIndex idx = ui.searchLine->mapToSource( ui.dictionaryOrder->indexAt( pos ) );
   sptr< Dictionary::Class > dict;
   if( idx.isValid() && (unsigned)idx.row() < ui.dictionaryOrder->getCurrentDictionaries().size() )
@@ -268,6 +263,11 @@ void OrderAndProps::contextMenuRequested( const QPoint & pos )
     showHeadwordsAction = new QAction( tr( "Dictionary headwords" ), &menu );
     menu.addAction( showHeadwordsAction );
   }
+
+  QAction * sortNameAction = new QAction( tr( "Sort by name" ), &menu );
+  menu.addAction( sortNameAction );
+  QAction * sortLangAction = new QAction( tr( "Sort by languages" ), &menu );
+  menu.addAction( sortLangAction );
 
   QAction * result = menu.exec( ui.dictionaryOrder->mapToGlobal( pos ) );
 

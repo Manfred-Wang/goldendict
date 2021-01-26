@@ -28,9 +28,19 @@ greaterThan(QT_MAJOR_VERSION, 4) {
           webkitwidgets \
           printsupport \
           help
+
+    # QMediaPlayer is not available in Qt4.
+    !CONFIG( no_qtmultimedia_player ) {
+      QT += multimedia
+      DEFINES += MAKE_QTMULTIMEDIA_PLAYER
+    }
 } else {
     QT += webkit
     CONFIG += help
+}
+
+!CONFIG( no_ffmpeg_player ) {
+  DEFINES += MAKE_FFMPEG_PLAYER
 }
 
 QT += sql
@@ -45,8 +55,6 @@ LIBS += \
         -lz \
         -lbz2 \
         -llzo2
-
-!isEmpty(DISABLE_INTERNAL_PLAYER): DEFINES += DISABLE_INTERNAL_PLAYER
 
 win32 {
     TARGET = GoldenDict
@@ -79,24 +87,13 @@ win32 {
             LIBS += -L$${PWD}/winlibs/lib
         }
         !x64:QMAKE_LFLAGS += -Wl,--large-address-aware
-	
-	isEmpty(HUNSPELL_LIB) {
-          CONFIG(gcc48) {
-            LIBS += -lhunspell-1.3.2
-          } else {
-            greaterThan(QT_MAJOR_VERSION, 4) {
-              lessThan(QT_MINOR_VERSION, 1) {
-                LIBS += -lhunspell-1.3-sjlj
-              } else {
-                LIBS += -lhunspell-1.3-dw2
-              }
-            } else {
-              LIBS += -lhunspell-1.3.2
-            }
-          }
+
+        isEmpty(HUNSPELL_LIB) {
+          LIBS += -lhunspell-1.6.1
         } else {
           LIBS += -l$$HUNSPELL_LIB
         }
+        QMAKE_CXXFLAGS += -Wextra -Wempty-body
     }
 
     LIBS += -liconv \
@@ -109,8 +106,9 @@ win32 {
     LIBS += -lvorbisfile \
         -lvorbis \
         -logg
-    isEmpty(DISABLE_INTERNAL_PLAYER) {
+    !CONFIG( no_ffmpeg_player ) {
         LIBS += -lao \
+            -lswresample-gd \
             -lavutil-gd \
             -lavformat-gd \
             -lavcodec-gd
@@ -155,11 +153,12 @@ unix:!mac {
         vorbis \
         ogg \
         hunspell
-    isEmpty(DISABLE_INTERNAL_PLAYER) {
+    !CONFIG( no_ffmpeg_player ) {
         PKGCONFIG += ao \
             libavutil \
             libavformat \
-            libavcodec
+            libavcodec \
+            libswresample \
     }
     arm {
         LIBS += -liconv
@@ -187,9 +186,15 @@ unix:!mac {
     desktops.path = $$PREFIX/share/applications
     desktops.files = redist/*.desktop
     INSTALLS += desktops
+    appdata.path = $$PREFIX/share/metainfo
+    appdata.files = redist/*.appdata.xml
+    INSTALLS += appdata
     helps.path = $$PREFIX/share/goldendict/help/
     helps.files = help/*.qch
     INSTALLS += helps
+}
+freebsd {
+    LIBS += -liconv -lexecinfo
 }
 mac {
     TARGET = GoldenDict
@@ -203,10 +208,11 @@ mac {
         -lvorbisfile \
         -lvorbis \
         -logg \
-        -lhunspell-1.2 \
+        -lhunspell-1.6.1 \
         -llzo2
-    isEmpty(DISABLE_INTERNAL_PLAYER) {
+    !CONFIG( no_ffmpeg_player ) {
         LIBS += -lao \
+            -lswresample-gd \
             -lavutil-gd \
             -lavformat-gd \
             -lavcodec-gd
@@ -276,6 +282,11 @@ HEADERS += folding.hh \
     article_maker.hh \
     scanpopup.hh \
     articleview.hh \
+    audioplayerinterface.hh \
+    audioplayerfactory.hh \
+    ffmpegaudioplayer.hh \
+    multimediaaudioplayer.hh \
+    externalaudioplayer.hh \
     externalviewer.hh \
     wordfinder.hh \
     groupcombobox.hh \
@@ -354,14 +365,18 @@ HEADERS += folding.hh \
     dictserver.hh \
     helpwindow.hh \
     slob.hh \
-    ripemd.hh
+    ripemd.hh \
+    gls.hh \
+    splitfile.hh \
+    favoritespanewidget.hh \
+    cpp_features.hh \
+    treeview.hh
 
 FORMS += groups.ui \
     dictgroupwidget.ui \
     mainwindow.ui \
     sources.ui \
     initializing.ui \
-    groupselectorwidget.ui \
     scanpopup.ui \
     articleview.ui \
     preferences.ui \
@@ -403,6 +418,9 @@ SOURCES += folding.cc \
     article_maker.cc \
     scanpopup.cc \
     articleview.cc \
+    audioplayerfactory.cc \
+    multimediaaudioplayer.cc \
+    externalaudioplayer.cc \
     externalviewer.cc \
     wordfinder.cc \
     groupcombobox.cc \
@@ -478,7 +496,11 @@ SOURCES += folding.cc \
     dictserver.cc \
     helpwindow.cc \
     slob.cc \
-    ripemd.cc
+    ripemd.cc \
+    gls.cc \
+    splitfile.cc \
+    favoritespanewidget.cc \
+    treeview.cc
 
 win32 {
     FORMS   += texttospeechsource.ui
@@ -497,7 +519,8 @@ win32 {
                sapi.hh \
                sphelper.hh \
                speechclient.hh \
-               speechhlp.hh
+               speechhlp.hh \
+               hotkeys.h
 }
 
 mac {
@@ -508,9 +531,20 @@ mac {
     SOURCES += texttospeechsource.cc
 }
 
+unix:!mac {
+    HEADERS += scanflag.hh
+    FORMS   += scanflag.ui
+    SOURCES += scanflag.cc
+}
+
+greaterThan(QT_MAJOR_VERSION, 4) {
+    HEADERS += wildcard.hh
+    SOURCES += wildcard.cc
+}
+
 CONFIG( zim_support ) {
   DEFINES += MAKE_ZIM_SUPPORT
-  LIBS += -llzma
+  LIBS += -llzma -lzstd
 }
 
 !CONFIG( no_extra_tiff_handler ) {
@@ -551,6 +585,10 @@ CONFIG( chinese_conversion_support ) {
   }
 }
 
+CONFIG( old_hunspell ) {
+  DEFINES += OLD_HUNSPELL_INTERFACE
+}
+
 RESOURCES += resources.qrc \
     flags.qrc
 TRANSLATIONS += locale/ru_RU.ts \
@@ -586,7 +624,11 @@ TRANSLATIONS += locale/ru_RU.ts \
     locale/sv_SE.ts \
     locale/tk_TM.ts \
     locale/fa_IR.ts \
-    locale/mk_MK.ts
+    locale/mk_MK.ts \
+    locale/eo_EO.ts \
+    locale/fi_FI.ts \
+    locale/jb_JB.ts \
+    locale/ie_001.ts
 
 # Build version file
 !isEmpty( hasGit ) {

@@ -36,7 +36,7 @@ Sources::Sources( QWidget * parent, Config::Class const & cfg):
   Config::Transliteration const & trs = cfg.transliteration;
   Config::Forvo const & forvo = cfg.forvo;
 
-  // TODO: will programTypeEditorCreator and itemEditorFactory be destoryed by
+  // TODO: will programTypeEditorCreator and itemEditorFactory be destroyed by
   // anyone?
   QItemEditorCreatorBase * programTypeEditorCreator =
          new QStandardItemEditorCreator< ProgramTypeEditor >();
@@ -613,7 +613,7 @@ int WebSitesModel::columnCount( QModelIndex const & parent ) const
   if ( parent.isValid() )
     return 0;
   else
-    return 4;
+    return 5;
 }
 
 QVariant WebSitesModel::headerData( int section, Qt::Orientation /*orientation*/, int role ) const

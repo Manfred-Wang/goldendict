@@ -15,6 +15,7 @@
 #include "config.hh"
 #include "dictionary.hh"
 #include "article_netmgr.hh"
+#include "audioplayerfactory.hh"
 #include "instances.hh"
 #include "article_maker.hh"
 #include "scanpopup.hh"
@@ -22,7 +23,6 @@
 #include "wordfinder.hh"
 #include "dictionarybar.hh"
 #include "history.hh"
-#include "hotkeywrapper.hh"
 #include "mainstatusbar.hh"
 #include "mruqmenu.hh"
 #include "translatebox.hh"
@@ -31,6 +31,7 @@
 #include "fulltextsearch.hh"
 #include "helpwindow.hh"
 
+#include "hotkeywrapper.hh"
 #ifdef HAVE_X11
 #include <fixx11h.h>
 #endif
@@ -74,6 +75,9 @@ public:
   QString getTranslateLineText() const
   { return translateLine->text(); }
 
+  /// Set group for main/popup window
+  void setGroupByName( QString const & name, bool main_window );
+
 public slots:
 
   void messageFromAnotherInstanceReceived( QString const & );
@@ -81,13 +85,16 @@ public slots:
   void wordReceived( QString const & );
   void headwordReceived( QString const &, QString const & );
   void setExpandMode( bool expand );
+  void headwordFromFavorites( QString const &, QString const & );
+  void quitApp();
 
 private:
   void addGlobalAction( QAction * action, const char * slot );
   void addGlobalActionsToDialog( QDialog * dialog );
+  void addGroupComboBoxActionsToDialog( QDialog * dialog, GroupComboBox * pGroupComboBox );
+  void removeGroupComboBoxActionsFromDialog( QDialog * dialog, GroupComboBox * pGroupComboBox );
 
   void commitData();
-  bool commitDataCompleted;
 
   QSystemTrayIcon * trayIcon;
 
@@ -111,19 +118,21 @@ private:
   TranslateBox * translateBox;
 
   /// Fonts saved before words zooming is in effect, so it could be reset back.
-  QFont wordListDefaultFont, translateLineDefaultFont;
+  QFont wordListDefaultFont, translateLineDefaultFont, groupListDefaultFont;
 
   QAction escAction, focusTranslateLineAction, addTabAction, closeCurrentTabAction,
           closeAllTabAction, closeRestTabAction,
           switchToNextTabAction, switchToPrevTabAction,
           showDictBarNamesAction, useSmallIconsInToolbarsAction, toggleMenuBarAction,
-          switchExpandModeAction, focusHeadwordsDlgAction, focusArticleViewAction;
+          switchExpandModeAction, focusHeadwordsDlgAction, focusArticleViewAction,
+          addAllTabToFavoritesAction;
   QToolBar * navToolbar;
   MainStatusBar * mainStatusBar;
   QAction * navBack, * navForward, * navPronounce, * enableScanPopup;
   QAction * beforeScanPopupSeparator, * afterScanPopupSeparator, * beforeOptionsSeparator;
   QAction * zoomIn, * zoomOut, * zoomBase;
   QAction * wordsZoomIn, * wordsZoomOut, * wordsZoomBase;
+  QAction * addToFavorites, * beforeAddToFavoritesSeparator;
   QMenu trayIconMenu;
   QMenu * tabMenu;
   QAction * menuButtonAction;
@@ -145,6 +154,7 @@ private:
   QNetworkAccessManager dictNetMgr; // We give dictionaries a separate manager,
                                     // since their requests can be destroyed
                                     // in a separate thread
+  AudioPlayerFactory audioPlayerFactory;
 
   WordList * wordList;
   QLineEdit * translateLine;
@@ -177,6 +187,8 @@ private:
 
   Help::HelpWindow * helpWindow;
 
+  QIcon starIcon, blueStarIcon;
+
   /// Applies the qt's stylesheet, given the style's name.
   void applyQtStyleSheet( QString const & displayStyle, QString const & addonStyle );
 
@@ -189,6 +201,7 @@ private:
 
   void applyProxySettings();
   void applyWebSettings();
+  void setupNetworkCache( int maxSize );
   void makeDictionaries();
   void updateStatusLine();
   void updateGroupList();
@@ -225,6 +238,7 @@ private:
   void installHotKeys();
 
   void applyZoomFactor();
+  void adjustCurrentZoomFactor();
 
   void mousePressEvent ( QMouseEvent * event );
 
@@ -240,6 +254,8 @@ private:
   void fillWordListFromHistory();
 
   void showDictionaryHeadwords( QWidget * owner, Dictionary::Class * dict );
+
+  QString unescapeTabHeader( QString const & header );
 
 private slots:
 
@@ -272,6 +288,12 @@ private slots:
   void editDictionary ( Dictionary::Class * dict );
 
   void showFTSIndexingName( QString const & name );
+
+  void handleAddToFavoritesButton();
+
+  void addCurrentTabToFavorites();
+
+  void addAllTabsToFavorites();
 
 private slots:
 
@@ -318,6 +340,8 @@ private slots:
   void zoomin();
   void zoomout();
   void unzoom();
+
+  void scaleArticlesByCurrentZoomFactor();
 
   void doWordsZoomIn();
   void doWordsZoomOut();
@@ -373,7 +397,7 @@ private slots:
                            QString const & dictID = QString() );
 
   void showTranslationFor( QString const &, QStringList const & dictIDs,
-                           QRegExp const & searchRegExp );
+                           QRegExp const & searchRegExp, bool ignoreDiacritics );
 
   void showHistoryItem( QString const & );
 
@@ -409,20 +433,30 @@ private slots:
 
   void on_rescanFiles_triggered();
 
+  void on_showHideFavorites_triggered();
   void on_showHideHistory_triggered();
   void on_exportHistory_triggered();
   void on_importHistory_triggered();
   void on_alwaysOnTop_triggered( bool checked );
   void focusWordList();
 
+  void on_exportFavorites_triggered();
+  void on_importFavorites_triggered();
+  void on_ExportFavoritesToList_triggered();
+
   void updateSearchPaneAndBar( bool searchInDock );
 
+  void updateFavoritesMenu();
   void updateHistoryMenu();
 
   /// Add word to history
   void addWordToHistory( const QString & word );
   /// Add word to history even if history is disabled in options
   void forceAddWordToHistory( const QString & word);
+
+  void addWordToFavorites( QString const & word, unsigned groupId );
+
+  bool isWordPresentedInFavorites( QString const & word, unsigned groupId );
 
   void sendWordToInputLine( QString const & word );
 
@@ -448,6 +482,9 @@ signals:
 
   /// Retranslate Ctrl(Shift) + Click on dictionary pane to dictionary toolbar
   void clickOnDictPane( QString const & id );
+
+  /// Set group for popup window
+  void setPopupGroupByName( QString const & name );
 
 #ifdef Q_OS_WIN32
   /// For receiving message from scan libraries
